@@ -1,11 +1,21 @@
-import dotenv
-dotenv.load_dotenv()
+"""
+life_coach_final.py
+====================
+Life Coach Agent with 3 tools:
+  1. Web Search    — 조언/팁 검색
+  2. File Search   — 개인 목표 문서 참조
+  3. Image Generation — 비전보드 / 동기부여 이미지 생성
 
-from openai import OpenAI
+Run:
+    streamlit run life_coach_final.py
+"""
+
+import os
 import asyncio
 import base64
-import time
+import dotenv
 import streamlit as st
+from openai import OpenAI
 from agents import (
     Agent,
     Runner,
@@ -15,80 +25,75 @@ from agents import (
     ImageGenerationTool,
 )
 
-client = OpenAI()
+dotenv.load_dotenv()
 
-VECTOR_STORE_ID = "vs_68a0815f62388191a9c3701ceb237234"
+# ============================================================
+# Page setup
+# ============================================================
+st.set_page_config(page_title="🌱 Life Coach", page_icon="🌱", layout="centered")
 
-LIFE_COACH_INSTRUCTIONS = """
-You are a Life Coach Agent. Default language: Korean (unless the user writes in English).
+# ============================================================
+# Constants
+# ============================================================
+VECTOR_STORE_ID = os.getenv(
+    "VECTOR_STORE_ID",
+    "",  # fallback — replace with your ID if not using .env
+)
+SESSION_DB = "life_coach_memory.db"
+SESSION_ID = "life-coach-session"
 
-You have exactly these tools:
-- Web Search Tool: Use to find advice/tips, motivational content, quotes, and up-to-date best practices.
-- File Search Tool: Use to reference the user's goals, plans, journals, and personal documents (vector store).
-- Image Generation Tool: Use to create (1) goal-based vision boards, (2) motivational posters with custom messages, (3) visual progress representations.
+if not VECTOR_STORE_ID:
+    st.error("⚠️ VECTOR_STORE_ID가 설정되지 않았습니다. .env 파일을 확인하세요.")
+    st.stop()
 
-CRITICAL: Your final answer MUST ALWAYS include these 3 sections as bullet lists (even if a tool was not used, write '- (이번 요청에서는 사용하지 않음)'):
+openai_client = OpenAI()
 
-### 🔍 Web Search (조언/팁 검색)
-- ...
+# ============================================================
+# Agent — created once, cached across reruns
+# ============================================================
+COACH_INSTRUCTIONS = """You are a Life Coach named "코치 하나" (Coach Hana).
+You are warm, encouraging, and action-oriented.
 
-### 🗂️ File Search (목표 문서 참조)
-- ...
+YOU HAVE 3 TOOLS:
 
-### 🎨 Image Generation (비전보드/포스터/진행 시각화)
-- ...
+1. 📂 File Search — The user's personal goals, journal entries, and progress data.
+   → Use this FIRST when they ask about their goals, progress, or journal.
+   → Quote specific numbers, dates, and entries from their document.
 
-TOOL ORCHESTRATION RULES:
-1) For vision board / motivational poster / progress visualization:
-   - First: File Search (extract goals/themes/progress data from docs)
-   - Second: Web Search (collect 3–7 relevant tips/quotes; keep it short)
-   - Third: Image Generation (generate an image based on the extracted goals + selected tips/quotes)
-2) For pure “조언/팁” request: Web Search only is fine, but still print the 3 sections.
-3) For requests referencing “내 목표/일기/문서”: File Search must be used.
+2. 🔍 Web Search — Search the internet for evidence-based advice.
+   → Use this to find current tips, scientific research, and best practices.
+   → Always cite what you found to build trust.
 
-IMAGE PROMPT STYLE GUIDELINES (Korean text in the image):
-- Vision board: clean collage layout (3x2 or 2x2), each panel matches a theme (health, finance, learning, relationships, travel, career). Minimal, modern aesthetic. Short Korean keywords only.
-- Motivational poster: bold Korean headline + smaller subline, strong typography, simple background, high contrast, no clutter.
-- Progress visualization: infographic style (progress bar, milestones, simple icons), clear numbers, Korean labels.
+3. 🎨 Image Generation — Create motivational images and vision boards.
+   → Use this when the user asks for a vision board, celebration image, or motivational poster.
+   → Also use this proactively when the user achieves a goal — surprise them with a congratulatory image!
+   → Create vivid, inspiring images with warm colors and positive energy.
 
-Safety/Privacy:
-- Do not reveal overly sensitive personal info from documents; paraphrase goals.
-- If the user’s prompt is missing key specifics (dates, counts), make reasonable assumptions and proceed.
-"""
+DECISION LOGIC:
+- "목표 어때?" / "진행 상황" → File Search first, then Web Search for tips
+- "팁 알려줘" / "방법" → Web Search first
+- "비전보드" / "이미지" / "축하" / goal achieved → Image Generation
+- Complex requests → combine multiple tools in sequence
 
-def map_role(role: str) -> str:
-    # streamlit chat_message roles are typically "human"/"ai"
-    if role in ("user", "human"):
-        return "human"
-    return "ai"
+STYLE:
+- Respond in Korean always.
+- Celebrate every win, no matter how small.
+- When the user is behind on a goal, reframe it positively.
+- Give concrete 3-step action plans, not vague advice.
+- Use emojis naturally but not excessively.
+- End with one follow-up question to keep the conversation going."""
 
-def poll_vector_store_file(vector_store_id: str, vs_file_id: str, status_container=None, timeout_s: int = 60):
-    start = time.time()
-    while True:
-        vs_file = client.vector_stores.files.retrieve(
-            vector_store_id=vector_store_id,
-            file_id=vs_file_id,
-        )
-        state = getattr(vs_file, "status", None)
-        if status_container:
-            status_container.update(label=f"⏳ Indexing file... ({state})")
-        if state == "completed":
-            return True
-        if state == "failed":
-            return False
-        if time.time() - start > timeout_s:
-            return False
-        time.sleep(0.5)
 
-if "agent" not in st.session_state:
-    st.session_state["agent"] = Agent(
-        name="Life Coach Agent",
-        instructions=LIFE_COACH_INSTRUCTIONS,
+@st.cache_resource
+def build_agent():
+    return Agent(
+        name="Coach Hana",
+        instructions=COACH_INSTRUCTIONS,
         tools=[
             WebSearchTool(),
             FileSearchTool(
                 vector_store_ids=[VECTOR_STORE_ID],
-                max_num_results=3,
+                max_num_results=5,
             ),
             ImageGenerationTool(
                 tool_config={
@@ -99,180 +104,196 @@ if "agent" not in st.session_state:
                 }
             ),
         ],
+        model="gpt-4o-mini",
     )
 
-agent = st.session_state["agent"]
 
+coach = build_agent()
+
+# ============================================================
+# Session — SQLite-backed persistent memory
+# ============================================================
 if "session" not in st.session_state:
-    st.session_state["session"] = SQLiteSession(
-        "chat-history",
-        "life-coach-memory.db",
+    st.session_state["session"] = SQLiteSession(SESSION_ID, SESSION_DB)
+
+memory = st.session_state["session"]
+
+# ============================================================
+# Sidebar
+# ============================================================
+with st.sidebar:
+    st.markdown("## 🌱 코치 하나")
+    st.caption("당신의 AI 라이프 코치")
+    st.divider()
+
+    st.markdown("### 🛠️ 도구 현황")
+    st.markdown(
+        """
+| 도구 | 상태 |
+|------|------|
+| 🔍 웹 검색 | ✅ 활성 |
+| 📂 파일 검색 | ✅ 활성 |
+| 🎨 이미지 생성 | ✅ 활성 |
+"""
     )
-session = st.session_state["session"]
+    st.divider()
 
-async def paint_history():
-    messages = await session.get_items()
+    st.markdown("### 💡 이런 걸 물어보세요")
+    prompts_to_try = {
+        "📊 목표 점검": "내 운동 목표 달성률은 어때?",
+        "🔍 습관 팁": "아침에 일찍 일어나는 과학적인 방법 알려줘",
+        "🎨 비전보드": "2025년 목표를 비전보드 이미지로 만들어줘",
+        "🎉 축하 이미지": "이번 달 독서 목표를 달성했어! 축하해줘",
+        "📖 독서 현황": "내 독서 목표 진행 상황 알려줘",
+        "🧘 명상 조언": "명상 습관을 만드는 좋은 방법이 뭐야?",
+    }
+    for label, prompt_text in prompts_to_try.items():
+        if st.button(label, key=label, use_container_width=True):
+            st.session_state["sidebar_prompt"] = prompt_text
 
-    for message in messages:
-        # Render chat messages
-        if "role" in message:
-            with st.chat_message(map_role(message["role"])):
-                content = message.get("content")
+    st.divider()
+    if st.button("🗑️ 대화 초기화", use_container_width=True):
+        asyncio.run(memory.clear_session())
+        st.rerun()
 
-                # user might be str or list parts
+# ============================================================
+# Helpers — render chat history from SQLiteSession
+# ============================================================
+
+
+async def render_saved_history():
+    """Read all items from SQLiteSession and display them."""
+    items = await memory.get_items()
+    for item in items:
+        # User messages
+        if item.get("role") == "user":
+            with st.chat_message("user"):
+                content = item.get("content", "")
                 if isinstance(content, str):
                     st.write(content)
                 elif isinstance(content, list):
                     for part in content:
-                        if isinstance(part, dict) and "image_url" in part:
-                            st.image(part["image_url"])
-                        elif isinstance(part, dict) and part.get("type") == "output_text":
-                            st.write(part.get("text", ""))
+                        if isinstance(part, dict):
+                            if part.get("type") == "input_text":
+                                st.write(part.get("text", ""))
+                            elif "image_url" in part:
+                                st.image(part["image_url"])
 
-                # assistant message format in your session sometimes:
-                if message.get("type") == "message":
-                    try:
-                        st.write(message["content"][0]["text"].replace("$", "\$"))
-                    except Exception:
-                        pass
+        # Assistant final text messages
+        elif item.get("role") == "assistant" and item.get("type") == "message":
+            with st.chat_message("assistant"):
+                content_parts = item.get("content", [])
+                for part in content_parts:
+                    if isinstance(part, dict) and "text" in part:
+                        st.write(part["text"].replace("$", r"\$"))
 
-        # Render tool call breadcrumbs / outputs
-        if "type" in message:
-            message_type = message["type"]
-            if message_type == "web_search_call":
-                with st.chat_message("ai"):
-                    st.write("🔍 Web Search 사용")
-            elif message_type == "file_search_call":
-                with st.chat_message("ai"):
-                    st.write("🗂️ File Search 사용")
-            elif message_type == "image_generation_call":
-                # some sessions store final base64 in "result"
-                b64 = message.get("result")
-                if b64:
-                    image = base64.b64decode(b64)
-                    with st.chat_message("ai"):
-                        st.image(image)
+        # Tool activity indicators
+        elif item.get("type") == "web_search_call":
+            with st.chat_message("assistant"):
+                st.info("🔍 웹에서 정보를 검색했습니다")
 
-asyncio.run(paint_history())
+        elif item.get("type") == "file_search_call":
+            with st.chat_message("assistant"):
+                st.info("📂 목표 문서를 확인했습니다")
 
-def update_status(status_container, event_type: str):
-    status_messages = {
-        "response.web_search_call.in_progress": ("🔍 웹 검색 시작...", "running"),
-        "response.web_search_call.searching": ("🔍 웹 검색 중...", "running"),
-        "response.web_search_call.completed": ("✅ 웹 검색 완료.", "complete"),
+        elif item.get("type") == "image_generation_call":
+            with st.chat_message("assistant"):
+                try:
+                    img_bytes = base64.b64decode(item["result"])
+                    st.image(img_bytes, caption="🎨 코치 하나가 만든 이미지")
+                except Exception:
+                    st.caption("🎨 이미지가 생성되었습니다")
 
-        "response.file_search_call.in_progress": ("🗂️ 파일 검색 시작...", "running"),
-        "response.file_search_call.searching": ("🗂️ 파일 검색 중...", "running"),
-        "response.file_search_call.completed": ("✅ 파일 검색 완료.", "complete"),
 
-        "response.image_generation_call.in_progress": ("🎨 이미지 생성 중...", "running"),
-        "response.image_generation_call.generating": ("🎨 이미지 생성 중...", "running"),
-        "response.image_generation_call.completed": ("✅ 이미지 생성 완료.", "complete"),
+asyncio.run(render_saved_history())
 
-        "response.completed": (" ", "complete"),
-    }
-    if event_type in status_messages:
-        label, state = status_messages[event_type]
-        status_container.update(label=label, state=state)
 
-async def run_agent(message: str):
-    with st.chat_message("ai"):
-        status_container = st.status("⏳", expanded=False)
-        image_placeholder = st.empty()
-        text_placeholder = st.empty()
-        response = ""
+# ============================================================
+# Helpers — streaming status labels
+# ============================================================
+STREAM_LABELS = {
+    # Web search
+    "response.web_search_call.in_progress": ("🔍 웹 검색 시작...", "running"),
+    "response.web_search_call.searching": ("🔍 검색 중...", "running"),
+    "response.web_search_call.completed": ("✅ 웹 검색 완료", "complete"),
+    # File search
+    "response.file_search_call.in_progress": ("📂 목표 문서 검색 시작...", "running"),
+    "response.file_search_call.searching": ("📂 문서 검색 중...", "running"),
+    "response.file_search_call.completed": ("✅ 문서 검색 완료", "complete"),
+    # Image generation
+    "response.image_generation_call.in_progress": ("🎨 이미지 생성 준비...", "running"),
+    "response.image_generation_call.generating": ("🎨 이미지 그리는 중...", "running"),
+    "response.image_generation_call.partial_image": ("🎨 이미지 완성 중...", "running"),
+    # Done
+    "response.completed": ("✅ 응답 완료", "complete"),
+}
+
+
+# ============================================================
+# Core — stream the agent's response
+# ============================================================
+
+
+async def stream_coach_response(user_message: str):
+    """Run the agent in streaming mode and render output live."""
+    with st.chat_message("assistant"):
+        status_box = st.status("🌱 코치 하나가 생각하는 중...", expanded=False)
+        image_area = st.empty()
+        text_area = st.empty()
+
+        accumulated_text = ""
 
         stream = Runner.run_streamed(
-            agent,
-            message,
-            session=session,
+            coach,
+            user_message,
+            session=memory,
         )
 
         async for event in stream.stream_events():
-            if event.type == "raw_response_event":
-                etype = event.data.type
-                update_status(status_container, etype)
+            if event.type != "raw_response_event":
+                continue
 
-                if etype == "response.output_text.delta":
-                    response += event.data.delta
-                    text_placeholder.write(response.replace("$", "\$"))
+            event_name = event.data.type
 
-                # partial image
-                if etype == "response.image_generation_call.partial_image":
-                    img_b64 = getattr(event.data, "partial_image_b64", None)
-                    if img_b64:
-                        image = base64.b64decode(img_b64)
-                        image_placeholder.image(image)
+            # Update status indicator
+            if event_name in STREAM_LABELS:
+                label, state = STREAM_LABELS[event_name]
+                status_box.update(label=label, state=state)
 
-                # final image fallback (schema differs by sdk version, so we guard)
-                if etype == "response.image_generation_call.completed":
-                    final_b64 = getattr(event.data, "result", None) or getattr(event.data, "image_b64", None)
-                    if final_b64:
-                        image = base64.b64decode(final_b64)
-                        image_placeholder.image(image)
+            # Stream text tokens
+            if event_name == "response.output_text.delta":
+                accumulated_text += event.data.delta
+                text_area.write(accumulated_text.replace("$", r"\$"))
 
-prompt = st.chat_input(
-    "Life Coach에게 메시지를 입력하세요 (파일 업로드 가능)",
-    accept_file=True,
-    file_type=["txt", "jpg", "jpeg", "png"],
-)
+            # Stream generated image (partial → final)
+            elif event_name == "response.image_generation_call.partial_image":
+                try:
+                    img_bytes = base64.b64decode(event.data.partial_image_b64)
+                    image_area.image(img_bytes, caption="🎨 코치 하나가 만든 이미지")
+                except Exception:
+                    pass
 
-if prompt:
-    for file in prompt.files:
-        if file.type.startswith("text/"):
-            with st.chat_message("ai"):
-                with st.status("⏳ Uploading file...") as status:
-                    uploaded_file = client.files.create(
-                        file=(file.name, file.getvalue()),
-                        purpose="user_data",
-                    )
-                    status.update(label="⏳ Attaching to vector store...")
 
-                    vs_file = client.vector_stores.files.create(
-                        vector_store_id=VECTOR_STORE_ID,
-                        file_id=uploaded_file.id,
-                    )
+# ============================================================
+# Title
+# ============================================================
+st.title("🌱 Life Coach Agent")
+st.caption("목표 점검 · 맞춤 조언 · 비전보드 이미지까지 — 코치 하나에게 물어보세요!")
 
-                    ok = poll_vector_store_file(VECTOR_STORE_ID, vs_file.id, status_container=status)
-                    if ok:
-                        status.update(label="✅ File uploaded + indexed", state="complete")
-                    else:
-                        status.update(label="⚠️ File uploaded but indexing not confirmed (try again)", state="error")
+# ============================================================
+# Chat input — handle sidebar button prompts + typed input
+# ============================================================
+# Check if a sidebar button was pressed
+sidebar_prompt = st.session_state.pop("sidebar_prompt", None)
 
-        elif file.type.startswith("image/"):
-            with st.status("⏳ Uploading image...") as status:
-                file_bytes = file.getvalue()
-                base64_data = base64.b64encode(file_bytes).decode("utf-8")
-                data_uri = f"data:{file.type};base64,{base64_data}"
+typed_input = st.chat_input("코치 하나에게 메시지를 보내세요...")
 
-                asyncio.run(
-                    session.add_items(
-                        [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "input_image",
-                                        "detail": "auto",
-                                        "image_url": data_uri,
-                                    }
-                                ],
-                            }
-                        ]
-                    )
-                )
-                status.update(label="✅ Image uploaded", state="complete")
+active_message = sidebar_prompt or typed_input
 
-            with st.chat_message("human"):
-                st.image(data_uri)
+if active_message:
+    # Show user message
+    with st.chat_message("user"):
+        st.write(active_message)
 
-    if prompt.text:
-        with st.chat_message("human"):
-            st.write(prompt.text)
-        asyncio.run(run_agent(prompt.text))
-
-with st.sidebar:
-    reset = st.button("Reset memory")
-    if reset:
-        asyncio.run(session.clear_session())
-    st.write(asyncio.run(session.get_items()))
+    # Run the agent
+    asyncio.run(stream_coach_response(active_message))
