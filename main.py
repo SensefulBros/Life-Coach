@@ -136,21 +136,7 @@ with st.sidebar:
 | 🎨 이미지 생성 | ✅ 활성 |
 """
     )
-    st.divider()
-
-    st.markdown("### 💡 이런 걸 물어보세요")
-    prompts_to_try = {
-        "📊 목표 점검": "내 운동 목표 달성률은 어때?",
-        "🔍 습관 팁": "아침에 일찍 일어나는 과학적인 방법 알려줘",
-        "🎨 비전보드": "2025년 목표를 비전보드 이미지로 만들어줘",
-        "🎉 축하 이미지": "이번 달 독서 목표를 달성했어! 축하해줘",
-        "📖 독서 현황": "내 독서 목표 진행 상황 알려줘",
-        "🧘 명상 조언": "명상 습관을 만드는 좋은 방법이 뭐야?",
-    }
-    for label, prompt_text in prompts_to_try.items():
-        if st.button(label, key=label, use_container_width=True):
-            st.session_state["sidebar_prompt"] = prompt_text
-
+    
     st.divider()
     if st.button("🗑️ 대화 초기화", use_container_width=True):
         asyncio.run(memory.clear_session())
